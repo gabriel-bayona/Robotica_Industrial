@@ -40,8 +40,8 @@ void IRAM_ATTR Timer0_ISR()
 
 #define MAXIMA_LONGITUD_DATOS 100
 
-#define FRECUENCIA 4000 // Frecuencia del PWM en Hz
-#define MAX_VALUE_ENCODER 10000 // Valor máximo del encoder --- esto depende del encoder, VERIFICAR EN DATASHEET
+#define FRECUENCIA 8000 // Frecuencia del PWM en Hz
+#define MAX_VALUE_ENCODER 62300 // Valor máximo del encoder --- esto depende del encoder, VERIFICAR EN DATASHEET
 
 ESP32_FAST_PWM* pwm;
 
@@ -57,7 +57,7 @@ float pwm_lect[MAXIMA_LONGITUD_DATOS];
 
 // Configuración del PID
 double input, output, setpoint;
-PID myPID(&input, &output, &setpoint, 2.0, 5.0, 1.0, DIRECT); // KP, KI, KD: valores a ajustar
+PID myPID(&input, &output, &setpoint, 10, 5.0, 1.0, DIRECT); // KP, KI, KD: valores a ajustar
 
 
 //Bandera de interrupcion
@@ -67,6 +67,7 @@ bool b_iden2; // bandera que indica si se debe trabajar la identificación 2
 //int MEF_iden1;
 bool b_PID;
 bool b_planta; // bandera que indica si se debe trabajar la planta indicada//cargada
+bool b_encoder = false; // bandera que indica si se debe mostrar el encoder
 bool b_graficos; // bandera que indica si se deben mostrar los gráficos por serial
 int duty;
 
@@ -117,6 +118,7 @@ void setup() {
   b_iden2 = false; 
   b_PID = false;
   b_planta = false;
+  b_encoder = false; // bandera para mostrar el encoder
   contador = 0;
 
 }
@@ -141,7 +143,11 @@ inline void Leer_serial() {
     } else if (inputStr == "stop") {
       Serial.println("PWM y motor apagados.");
       b_iden = false;
+      b_iden2 = false;
+      b_graficos = false;
+      b_encoder = false;
       b_PID = false;
+      encoder.clearCount();
       digitalWrite(SENTIDOHORARIO, LOW);
       digitalWrite(SENTIDOANTIHORARIO, LOW);
       pwm->setPWM(PWM_PIN, FRECUENCIA, 0);
@@ -185,7 +191,31 @@ inline void Leer_serial() {
         Serial.println("Error: Formato incorrecto. Usa: spid <kp> <kd> <ki>");
       }
 
-    }  else if (inputStr.startsWith("show")) {
+    }else if (inputStr.startsWith("spwm")) {
+      inputStr.remove(0, 4);
+      inputStr.trim();
+
+      int duty_fijo = inputStr.toInt();
+
+      if (duty_fijo >0 && duty_fijo <= 100) {
+        digitalWrite(SENTIDOHORARIO, HIGH);
+        digitalWrite(SENTIDOANTIHORARIO, LOW);
+      } else if (duty_fijo < 0 && duty_fijo >= -100) {
+        digitalWrite(SENTIDOHORARIO, LOW);
+        digitalWrite(SENTIDOANTIHORARIO, HIGH);
+      } else 
+      {
+        digitalWrite(SENTIDOHORARIO, LOW);
+        digitalWrite(SENTIDOANTIHORARIO, LOW);
+      }
+
+      duty_fijo = abs(duty_fijo); // Asegurarse de que el valor sea positivo (lo requiere el objeto pwm)
+      pwm->setPWM(PWM_PIN, FRECUENCIA, duty_fijo);
+      Serial.printf("PWM actualizado -> PWM: %.2f\n", (float)duty_fijo);
+
+      
+
+    }else if (inputStr.startsWith("show")) {
       inputStr.remove(0, 4);
       inputStr.trim();
 
@@ -197,13 +227,16 @@ inline void Leer_serial() {
         Serial.printf("Valores PID actuales:\nKp: %.2f | Ki: %.2f | Kd: %.2f\n", kp, ki, kd);
         Serial.printf("\nSetpoint actual: %.2f\n", setpoint);
       } else if (inputStr == "data") {
-        Serial.println("Mostrando arrays:");
+        //Serial.println("Mostrando arrays:");
         for (int i = 0; i < MAXIMA_LONGITUD_DATOS; i++) {
           Serial.printf("%d\t%.2f\t%.2f\n", i, encoder_lect[i], pwm_lect[i]);
         }
       
       
-      } else if (inputStr == "pout") {
+      } else if (inputStr == "pwm"){
+        Serial.printf("- PWM: %d\n", pwm->getActualDutyCycle());
+
+      }else if (inputStr == "pout") {
         Serial.println("Pines:");
         Serial.printf("- PWM_PIN: %d\n", PWM_PIN);
         Serial.printf("- POT_PIN: %d\n", POT_PIN);
@@ -211,8 +244,16 @@ inline void Leer_serial() {
         Serial.printf("- SENTIDOHORARIO: %d\n", SENTIDOHORARIO);
         Serial.printf("- SENTIDOANTIHORARIO: %d\n", SENTIDOANTIHORARIO);
         
-      }else {
-        Serial.println("Uso de 'show':\n - show pid\n - show data");
+      }else if (inputStr == "pose") {
+        b_encoder = !b_encoder; // Cambia el estado de la bandera
+        if (b_encoder) {
+          Serial.println("Lectura del encoder activada.");
+        } else {
+          Serial.println("Lectura del encoder desactivada.");
+        }
+      }     
+      else {
+        Serial.println("Uso de 'show':\n - show pid\n - show data\n - show pose\n - show pout\n");
       }
 
 
@@ -246,6 +287,7 @@ inline void Leer_serial() {
       } else {
         Serial.println("Gráficos desactivados.");
       }
+
     }else if (inputStr == "help")
     {
       Serial.println("Comandos disponibles:");
@@ -253,11 +295,13 @@ inline void Leer_serial() {
       Serial.println(" - stop: Detener PWM y motor.");
       Serial.println(" - iden: Activar identificación (variacion discreta de pwm).");
       Serial.println(" - ide2: Activar identificación 2 (variacion continua de pwm).");
-      Serial.println(" - pout: Mostrar pines utilizados.");
       Serial.println(" - setp <valor>: Asignar setpoint.");
+      Serial.println(" - spwm <duty>: Actualizar PWM (0-100 o -100 a 100).");
       Serial.println(" - spid <kp> <kd> <ki>: Actualizar PID.");
       Serial.println(" - show pid: Mostrar valores PID actuales.");
       Serial.println(" - show data: Mostrar arrays de datos.");
+      Serial.println(" - show pout: Mostrar pines utilizados.");
+      Serial.println(" - show pose: Mostrar posicion actual encoder.");
       Serial.println(" - rest: Reiniciar sistema.");
       Serial.println(" - enab: Encender habilitador.");
       Serial.println(" - disa: Apagar habilitador.");
@@ -457,6 +501,11 @@ void loop() {
 
   }
 
+  if (b_encoder)
+  {
+    Serial.printf(">Encoder:%d\n", encoder.getCount());
+  }
+  
 // Mostrar por Serial
   if (b_graficos){
 
@@ -473,7 +522,10 @@ void loop() {
 
   //Grafico la posición del encoder en formato polar
   float angle_deg = (float(pos) / MAX_VALUE_ENCODER) * 360.0;
-  //Serial.printf(">@polar(%.2f, 1) PosicionEncoder\n", angle_deg);
+  //Serial.printf(">PosicionEncoder%ld:%d\n", millis(),(int) encoder.getCount());
+
+
+  Serial.printf(">Encoder:%d\n", encoder.getCount());
   Serial.printf(">Contador: %d\n", contador);
 
   if(digitalRead(SENTIDOANTIHORARIO) == HIGH){
