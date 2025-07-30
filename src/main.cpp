@@ -59,6 +59,11 @@ float pwm_lect[MAXIMA_LONGITUD_DATOS];
 double input, output, setpoint;
 PID myPID(&input, &output, &setpoint, 10, 5.0, 1.0, DIRECT); // KP, KI, KD: valores a ajustar
 
+void apagarControl();
+
+//funcion para apagar todo
+
+
 
 //Bandera de interrupcion
 bool b_mostrar; // bandera que indica si se debe mostrar la salida por serial
@@ -72,6 +77,14 @@ bool b_graficos; // bandera que indica si se deben mostrar los gráficos por ser
 int duty;
 
 bool encabezado = false;
+
+
+void apagarControl() {
+  b_PID = false;
+  b_iden2 = false;
+  b_iden = false;
+  b_planta = false;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -131,8 +144,8 @@ inline void Leer_serial() {
 
     if (inputStr == "strt") {
       contador = 0;
-      b_iden = false;
-      b_PID = false;
+      apagarControl();
+      
       encoder.clearCount();
       Serial.println("Modo predeterminado iniciado.");
       digitalWrite(SENTIDOHORARIO, LOW);
@@ -141,25 +154,28 @@ inline void Leer_serial() {
       pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
 
     } else if (inputStr == "stop") {
-      Serial.println("PWM y motor apagados.");
-      b_iden = false;
-      b_iden2 = false;
+
+      apagarControl();
       b_graficos = false;
       b_encoder = false;
-      b_PID = false;
+      b_mostrar = false;
+
       encoder.clearCount();
       digitalWrite(SENTIDOHORARIO, LOW);
       digitalWrite(SENTIDOANTIHORARIO, LOW);
       pwm->setPWM(PWM_PIN, FRECUENCIA, 0);
       duty = 0;
 
+      Serial.println("PWM y motor detenidos.");
+
     } else if (inputStr == "iden") {
+      apagarControl();
       b_iden = true;
       contador = 0;
       encoder.clearCount();
       Serial.println("Identificación 1 activada.");
-    }else if (inputStr == "ide2")
-    {
+    }else if (inputStr == "ide2"){
+      apagarControl();
       b_iden2 = true;
       contador = 0;
       encoder.clearCount();
@@ -171,7 +187,6 @@ inline void Leer_serial() {
       double valor = inputStr.toDouble();
       setpoint = valor;
       Serial.printf("Setpoint asignado: %.2f\n", setpoint);
-      b_PID = true;
 
     } else if (inputStr.startsWith("spid")) {
       inputStr.remove(0, 4);
@@ -191,12 +206,25 @@ inline void Leer_serial() {
         Serial.println("Error: Formato incorrecto. Usa: spid <kp> <kd> <ki>");
       }
 
-    }else if (inputStr.startsWith("spwm")) {
+    }
+    else if (inputStr == "epid")
+        {
+          apagarControl();
+          b_PID = true;
+
+          contador = 0;
+          encoder.clearCount();
+          Serial.println("PID activado.");
+        } 
+
+    else if (inputStr.startsWith("spwm")) {
+      apagarControl();
       inputStr.remove(0, 4);
       inputStr.trim();
 
       int duty_fijo = inputStr.toInt();
 
+      //De acuerdo al valor de duty_fijo, se define el sentido del motor
       if (duty_fijo >0 && duty_fijo <= 100) {
         digitalWrite(SENTIDOHORARIO, HIGH);
         digitalWrite(SENTIDOANTIHORARIO, LOW);
@@ -234,7 +262,16 @@ inline void Leer_serial() {
       
       
       } else if (inputStr == "pwm"){
-        Serial.printf("- PWM: %d\n", pwm->getActualDutyCycle());
+
+        if (SENTIDOHORARIO) {
+          Serial.printf("- PWM: %d\n", pwm->getActualDutyCycle());
+        } else if (SENTIDOANTIHORARIO) {
+          Serial.printf("- PWM: %d\n",(-1) * pwm->getActualDutyCycle());
+        } else 
+        {
+          Serial.printf("- PWM: %d\n", pwm->getActualDutyCycle());
+        }
+        
 
       }else if (inputStr == "pout") {
         Serial.println("Pines:");
@@ -257,30 +294,30 @@ inline void Leer_serial() {
       }
 
 
-    } else if (inputStr == "rest") {
+    }else if (inputStr == "rest") {
       Serial.println("Reiniciando sistema...");
       for (int i = 0; i < MAXIMA_LONGITUD_DATOS; i++) {
         encoder_lect[i] = 0;
         pwm_lect[i] = 0;
       }
-      b_iden = false;
-      b_PID = false;
+      apagarControl();
       b_mostrar = false;
+      b_graficos = false;
       duty = 0;
       encoder.clearCount();
       digitalWrite(SENTIDOHORARIO, LOW);
       digitalWrite(SENTIDOANTIHORARIO, LOW);
       pwm->setPWM(PWM_PIN, FRECUENCIA, 0);
 
-    } else if (inputStr == "enab") {
+    }else if (inputStr == "enab") {
       digitalWrite(ENABLE, HIGH);
       Serial.println("Habilitador encendido.");
 
-    } else if (inputStr == "disa") {
+    }else if (inputStr == "disa") {
       digitalWrite(ENABLE, LOW);
       Serial.println("Habilitador apagado.");
 
-    } else if (inputStr == "graf") {
+    }else if (inputStr == "graf") {
       b_graficos = !b_graficos; // Cambia el estado de la bandera
       if (b_graficos) {
         Serial.println("Gráficos activados.");
@@ -308,6 +345,22 @@ inline void Leer_serial() {
       Serial.println(" - graf: Activar/desactivar gráficos por serial.");
     }
     
+    // else if (inputStr.startsWith("log")) {
+    //   inputStr.remove(0, 3);
+    //   inputStr.trim();
+      
+    //   if (inputStr.startsWith("on")) {
+    //     b_mostrar = true;
+    //     Serial.println("Registro de datos activado.");
+    //   } else if (inputStr.startsWith("off")) {
+    //     b_mostrar = false;
+    //     Serial.println("Registro de datos desactivado.");
+    //   } else {
+    //     Serial.println("Comando no reconocido. Usa 'log on' o 'log off'.");
+    //   }
+      
+    // } 
+
     else {
       Serial.printf("Comando no reconocido: %s\n", inputStr.c_str());
     }
@@ -374,8 +427,18 @@ void loop() {
 
     }
     
-    encoder_lect[contador] = encoder.getCount();
-    pwm_lect[contador] = duty;
+
+    // Guardar los valores de encoder y PWM en los arrays
+    //EL PWM SE GUARDA SEGUN SENTIDO, YA QUE EL OBJETO PWM NO ME PERMITE HACERLO CON UN VALOR NEGATIVO
+    if(SENTIDOANTIHORARIO){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = duty;
+
+    }else if(SENTIDOHORARIO){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = (-1)*duty;
+    }
+    
   }  
   
   // Segundo if para identificar la planta con PID
@@ -407,8 +470,16 @@ void loop() {
 
     }
 
-    encoder_lect[contador] = encoder.getCount();
-    pwm_lect[contador] = duty;
+    // Guardar los valores de encoder y PWM en los arrays
+    //EL PWM SE GUARDA SEGUN SENTIDO, YA QUE EL OBJETO PWM NO ME PERMITE HACERLO CON UN VALOR NEGATIVO
+    if(SENTIDOANTIHORARIO){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = duty;
+
+    }else if(SENTIDOHORARIO){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = (-1)*duty;
+    }
   }
 
   //Segundo if, asigna el PID
@@ -431,6 +502,16 @@ void loop() {
       digitalWrite(SENTIDOANTIHORARIO, HIGH);
       pwm->setPWM(PWM_PIN, FRECUENCIA, (int)(-output)); // valor positivo para PWM / evito tener dos variables duty, la ultima es el duty casteado.
   }
+
+  // Guardar los valores de encoder y PWM en los arrays
+  //EL PWM SE GUARDA SEGUN SENTIDO, YA QUE EL OBJETO PWM NO ME PERMITE HACERLO CON UN VALOR NEGATIVO
+    if(SENTIDOANTIHORARIO){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = duty;
+    }else if(SENTIDOHORARIO){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = (-1)*duty;
+    }
 
   }
 
@@ -496,8 +577,16 @@ void loop() {
     default:
       break; 
     }
-    encoder_lect[contador] = encoder.getCount();
-    pwm_lect[contador] = duty;
+    // Guardar los valores de encoder y PWM en los arrays
+    //EL PWM SE GUARDA SEGUN SENTIDO, YA QUE EL OBJETO PWM NO ME PERMITE HACERLO CON UN VALOR NEGATIVO
+    if(SENTIDOANTIHORARIO){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = duty;
+
+    }else if(SENTIDOHORARIO){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = (-1)*duty;
+    }
 
   }
 
@@ -546,6 +635,5 @@ void loop() {
   }else {
     contador = 0; // Reinicia el contador si no está en modo identificación o PID
   }
-  
   
 }
