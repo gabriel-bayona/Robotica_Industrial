@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <ESP32_FastPWM.h>
-#include <PID_v1.h>
 
 // Interrup timer
 hw_timer_t *Timer0_Cfg = NULL;
@@ -35,18 +34,23 @@ void IRAM_ATTR Timer0_ISR()
 #define PWM_CHANNEL 0    // Canal PWM // NO ES UN PIN
 
 #define ENABLE 5                 //ESTE PIN HABILITA EL DRIVER
-#define SENTIDOHORARIO 16     // Pin para sentido horario 
-#define SENTIDOANTIHORARIO 15     // Pin para sentido antihorario
+#define SENTIDO_HORARIO 16     // Pin para sentido horario 
+#define SENTIDO_ANTIHORARIO 15     // Pin para sentido antihorario
 
 #define MAXIMA_LONGITUD_DATOS 100
 
 #define FRECUENCIA 8000 // Frecuencia del PWM en Hz
 #define MAX_VALUE_ENCODER 62300 // Valor máximo del encoder --- esto depende del encoder, VERIFICAR EN DATASHEET
 
+#define V_PID_MIN -12 // Valor mínimo del PID
+#define V_PID_MAX 12 // Valor máximo del PID
+
 ESP32_FAST_PWM* pwm;
 
 //
 ESP32Encoder encoder;
+
+
 long QEI_Pos,QEI_Pos_1; //24300 pulsos por vuelta
 
 int contador;
@@ -56,8 +60,21 @@ float pwm_lect[MAXIMA_LONGITUD_DATOS];
 
 
 // Configuración del PID
-double input, output, setpoint;
-PID myPID(&input, &output, &setpoint, 10, 5.0, 1.0, DIRECT); // KP, KI, KD: valores a ajustar
+double error_actual, output, setpoint;
+
+float x0, x0_1;
+float x0_p, x0_p1;
+float a, b, c, Ts; //Constantes para parámetros de controlador PID
+float rT, eT, iT, dT, yT, uT, iT0, eT0, u_1; //Variables de controlador PID
+
+double kp;
+double ki;
+double kd;
+
+
+long filtro[5]; //para calcular un promedio de valores
+
+bool b_windup = true;
 
 void apagarControl();
 
@@ -89,8 +106,8 @@ void apagarControl() {
 void setup() {
   Serial.begin(115200);
   analogReadResolution(12); // Resolución ADC de 12 bits (0-4095)
-  pinMode(SENTIDOANTIHORARIO, OUTPUT);
-  pinMode(SENTIDOHORARIO, OUTPUT);
+  pinMode(SENTIDO_ANTIHORARIO, OUTPUT);
+  pinMode(SENTIDO_HORARIO, OUTPUT);
   pinMode(ENABLE, OUTPUT);
   digitalWrite(ENABLE, HIGH);
 
@@ -109,6 +126,8 @@ void setup() {
     while (1); //si no se crea, me clavo acá
   }
 
+
+
   //Configuracion del encoder
   encoder.attachFullQuad( CHA_A, CHA_B );
   //encoder.setCount(100); 
@@ -116,14 +135,19 @@ void setup() {
   encoder.setFilter(1023);
 
 
-  // Configuración del PID
-  myPID.SetOutputLimits(-100, 100); // Salida PID entre -100 y 100
-  myPID.SetMode(AUTOMATIC);
+  //Configuracion del PID
+  Ts = 0.01; //tiempo de muestreo
 
+  b_windup = true;
+	Ts = 0.01;
+  x0_1 = 0.0;
+	iT0 = 0.0;  // acumulador integrador
+	eT0 = 0.0;  // valor previo deriv
+	u_1 = 0.0;  // valor previo u
 
-  QEI_Pos = 0;
-  QEI_Pos_1 = 0;
-
+  a = 80;
+	b = 0.5 * a * Ts; 
+	c = 0.001 * a / Ts; 
 
   //estas son variables de control del programa (me mueven entre las diferentes fuciones)
   b_mostrar = false;
@@ -148,8 +172,8 @@ inline void Leer_serial() {
       
       encoder.clearCount();
       Serial.println("Modo predeterminado iniciado.");
-      digitalWrite(SENTIDOHORARIO, LOW);
-      digitalWrite(SENTIDOANTIHORARIO, HIGH);
+      digitalWrite(SENTIDO_HORARIO, LOW);
+      digitalWrite(SENTIDO_ANTIHORARIO, HIGH);
       duty = 50;
       pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
 
@@ -161,8 +185,8 @@ inline void Leer_serial() {
       b_mostrar = false;
 
       encoder.clearCount();
-      digitalWrite(SENTIDOHORARIO, LOW);
-      digitalWrite(SENTIDOANTIHORARIO, LOW);
+      digitalWrite(SENTIDO_HORARIO, LOW);
+      digitalWrite(SENTIDO_ANTIHORARIO, LOW);
       pwm->setPWM(PWM_PIN, FRECUENCIA, 0);
       duty = 0;
 
@@ -196,11 +220,10 @@ inline void Leer_serial() {
       int secondSpace = inputStr.indexOf(' ', firstSpace + 1);
 
       if (firstSpace > 0 && secondSpace > firstSpace) {
-        double kp = inputStr.substring(0, firstSpace).toDouble();
-        double kd = inputStr.substring(firstSpace + 1, secondSpace).toDouble();
-        double ki = inputStr.substring(secondSpace + 1).toDouble();
+        kp = inputStr.substring(0, firstSpace).toDouble();
+        kd = inputStr.substring(firstSpace + 1, secondSpace).toDouble();
+        ki = inputStr.substring(secondSpace + 1).toDouble();
 
-        myPID.SetTunings(kp, ki, kd);
         Serial.printf("PID actualizado -> Kp: %.2f | Ki: %.2f | Kd: %.2f\n", kp, ki, kd);
       } else {
         Serial.println("Error: Formato incorrecto. Usa: spid <kp> <kd> <ki>");
@@ -226,15 +249,15 @@ inline void Leer_serial() {
 
       //De acuerdo al valor de duty_fijo, se define el sentido del motor
       if (duty_fijo >0 && duty_fijo <= 100) {
-        digitalWrite(SENTIDOHORARIO, HIGH);
-        digitalWrite(SENTIDOANTIHORARIO, LOW);
+        digitalWrite(SENTIDO_HORARIO, HIGH);
+        digitalWrite(SENTIDO_ANTIHORARIO, LOW);
       } else if (duty_fijo < 0 && duty_fijo >= -100) {
-        digitalWrite(SENTIDOHORARIO, LOW);
-        digitalWrite(SENTIDOANTIHORARIO, HIGH);
+        digitalWrite(SENTIDO_HORARIO, LOW);
+        digitalWrite(SENTIDO_ANTIHORARIO, HIGH);
       } else 
       {
-        digitalWrite(SENTIDOHORARIO, LOW);
-        digitalWrite(SENTIDOANTIHORARIO, LOW);
+        digitalWrite(SENTIDO_HORARIO, LOW);
+        digitalWrite(SENTIDO_ANTIHORARIO, LOW);
       }
 
       duty_fijo = abs(duty_fijo); // Asegurarse de que el valor sea positivo (lo requiere el objeto pwm)
@@ -248,10 +271,6 @@ inline void Leer_serial() {
       inputStr.trim();
 
       if (inputStr == "pid") {
-        double kp, ki, kd;
-        kp = myPID.GetKp();
-        ki = myPID.GetKi();
-        kd = myPID.GetKd();
         Serial.printf("Valores PID actuales:\nKp: %.2f | Ki: %.2f | Kd: %.2f\n", kp, ki, kd);
         Serial.printf("\nSetpoint actual: %.2f\n", setpoint);
       } else if (inputStr == "data") {
@@ -263,9 +282,9 @@ inline void Leer_serial() {
       
       } else if (inputStr == "pwm"){
 
-        if (SENTIDOHORARIO) {
+        if (SENTIDO_HORARIO) {
           Serial.printf("- PWM: %d\n", pwm->getActualDutyCycle());
-        } else if (SENTIDOANTIHORARIO) {
+        } else if (SENTIDO_ANTIHORARIO) {
           Serial.printf("- PWM: %d\n",(-1) * pwm->getActualDutyCycle());
         } else 
         {
@@ -278,8 +297,8 @@ inline void Leer_serial() {
         Serial.printf("- PWM_PIN: %d\n", PWM_PIN);
         Serial.printf("- POT_PIN: %d\n", POT_PIN);
         Serial.printf("- ENABLE: %d\n", ENABLE);
-        Serial.printf("- SENTIDOHORARIO: %d\n", SENTIDOHORARIO);
-        Serial.printf("- SENTIDOANTIHORARIO: %d\n", SENTIDOANTIHORARIO);
+        Serial.printf("- SENTIDO_HORARIO: %d\n", SENTIDO_HORARIO);
+        Serial.printf("- SENTIDOANTIHORARIO: %d\n", SENTIDO_ANTIHORARIO);
         
       }else if (inputStr == "pose") {
         b_encoder = !b_encoder; // Cambia el estado de la bandera
@@ -305,8 +324,8 @@ inline void Leer_serial() {
       b_graficos = false;
       duty = 0;
       encoder.clearCount();
-      digitalWrite(SENTIDOHORARIO, LOW);
-      digitalWrite(SENTIDOANTIHORARIO, LOW);
+      digitalWrite(SENTIDO_HORARIO, LOW);
+      digitalWrite(SENTIDO_ANTIHORARIO, LOW);
       pwm->setPWM(PWM_PIN, FRECUENCIA, 0);
 
     }else if (inputStr == "enab") {
@@ -344,22 +363,6 @@ inline void Leer_serial() {
       Serial.println(" - disa: Apagar habilitador.");
       Serial.println(" - graf: Activar/desactivar gráficos por serial.");
     }
-    
-    // else if (inputStr.startsWith("log")) {
-    //   inputStr.remove(0, 3);
-    //   inputStr.trim();
-      
-    //   if (inputStr.startsWith("on")) {
-    //     b_mostrar = true;
-    //     Serial.println("Registro de datos activado.");
-    //   } else if (inputStr.startsWith("off")) {
-    //     b_mostrar = false;
-    //     Serial.println("Registro de datos desactivado.");
-    //   } else {
-    //     Serial.println("Comando no reconocido. Usa 'log on' o 'log off'.");
-    //   }
-      
-    // } 
 
     else {
       Serial.printf("Comando no reconocido: %s\n", inputStr.c_str());
@@ -372,29 +375,32 @@ inline void Leer_serial() {
 
 void loop() {
   
+
+
   while(Int_State){Leer_serial();} // Espera a que la interrupción ocurra
   Int_State = true;
-
-  // QEI_Pos_1 = QEI_Pos; // Save the previous position
-  // QEI_Pos = encoder.getCount();
   
-  // Aplicar los valores PWM -- Trabajar
-  pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
+  //pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
 
   encoder_lect[contador]=encoder.getCount();
+
+  QEI_Pos_1 = QEI_Pos; // Save the previous position
+  QEI_Pos = encoder.getCount();
     
   // Primer if para identificar la planta
   if (b_iden) {
     switch (contador) {
       case 0:
-        digitalWrite(SENTIDOHORARIO, LOW);
-        digitalWrite(SENTIDOANTIHORARIO, HIGH);
-        duty = 25;
+        digitalWrite(SENTIDO_HORARIO, LOW);
+        digitalWrite(SENTIDO_ANTIHORARIO, HIGH);
+        duty = 10;
         pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
         break;
         
       case 20:
-        duty = 60;
+        digitalWrite(SENTIDO_ANTIHORARIO, HIGH);
+        digitalWrite(SENTIDO_HORARIO, LOW);
+        duty = 20;
         pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
 
         break;
@@ -402,26 +408,29 @@ void loop() {
       case 40:
         duty = 0;
         pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
-        digitalWrite(SENTIDOANTIHORARIO, LOW);
-        digitalWrite(SENTIDOHORARIO, LOW);
+        digitalWrite(SENTIDO_ANTIHORARIO, LOW);
+        digitalWrite(SENTIDO_HORARIO, LOW);
         break;
         
       case 60:
-        digitalWrite(SENTIDOHORARIO, HIGH);
-        duty = 40;
+        digitalWrite(SENTIDO_ANTIHORARIO, LOW);
+        digitalWrite(SENTIDO_HORARIO, HIGH);
+        duty = 10; //-10
         pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
         break;
         
       case 80:
-        duty = 90;
+        duty = 20; //-20
+        digitalWrite(SENTIDO_ANTIHORARIO, LOW);
+        digitalWrite(SENTIDO_HORARIO, HIGH);
         pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
         break;
         
       case 100:
         duty = 0;
         pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
-        digitalWrite(SENTIDOHORARIO, LOW);
-        digitalWrite(SENTIDOANTIHORARIO, LOW);
+        digitalWrite(SENTIDO_HORARIO, LOW);
+        digitalWrite(SENTIDO_ANTIHORARIO, LOW);
         b_iden = false;
         break;
 
@@ -430,13 +439,16 @@ void loop() {
 
     // Guardar los valores de encoder y PWM en los arrays
     //EL PWM SE GUARDA SEGUN SENTIDO, YA QUE EL OBJETO PWM NO ME PERMITE HACERLO CON UN VALOR NEGATIVO
-    if(SENTIDOANTIHORARIO){
-      encoder_lect[contador] = encoder.getCount();
-      pwm_lect[contador] = duty;
-
-    }else if(SENTIDOHORARIO){
+    if(digitalRead(SENTIDO_HORARIO) == HIGH){
       encoder_lect[contador] = encoder.getCount();
       pwm_lect[contador] = (-1)*duty;
+
+    }else if(digitalRead(SENTIDO_ANTIHORARIO) == HIGH){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = duty;
+    }else{
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = 0; // Si no hay sentido, guardo 0
     }
     
   }  
@@ -445,26 +457,26 @@ void loop() {
   if(b_iden2){
 
     if(contador <30){
-      digitalWrite(SENTIDOHORARIO, LOW);
-      digitalWrite(SENTIDOANTIHORARIO, HIGH);
+      digitalWrite(SENTIDO_HORARIO, LOW);
+      digitalWrite(SENTIDO_ANTIHORARIO, HIGH);
       duty = contador * 2.5; // Incrementa el duty de 0 a 75
       pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
 
     } else if (contador >= 30 && contador <= 50) {
-      digitalWrite(SENTIDOHORARIO, HIGH);
-      digitalWrite(SENTIDOANTIHORARIO, LOW);
+      digitalWrite(SENTIDO_HORARIO, HIGH);
+      digitalWrite(SENTIDO_ANTIHORARIO, LOW);
       duty = 70 - contador; // Decrementa el duty de 75 a 0
       pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
 
     } else if (contador > 50 && contador < 70) {
-      digitalWrite(SENTIDOHORARIO, LOW);
-      digitalWrite(SENTIDOANTIHORARIO, HIGH);
+      digitalWrite(SENTIDO_HORARIO, LOW);
+      digitalWrite(SENTIDO_ANTIHORARIO, HIGH);
       duty =  contador  - 50; // Incrementa el duty de 0 a 75
       pwm->setPWM(PWM_PIN, FRECUENCIA, duty);
 
     } else {
-      digitalWrite(SENTIDOHORARIO, LOW);
-      digitalWrite(SENTIDOANTIHORARIO, LOW);
+      digitalWrite(SENTIDO_HORARIO, LOW);
+      digitalWrite(SENTIDO_ANTIHORARIO, LOW);
       pwm->setPWM(PWM_PIN, FRECUENCIA, 0); // Apaga el PWM
       b_iden2 = false; // Termina la identificación con PID
 
@@ -472,50 +484,117 @@ void loop() {
 
     // Guardar los valores de encoder y PWM en los arrays
     //EL PWM SE GUARDA SEGUN SENTIDO, YA QUE EL OBJETO PWM NO ME PERMITE HACERLO CON UN VALOR NEGATIVO
-    if(SENTIDOANTIHORARIO){
-      encoder_lect[contador] = encoder.getCount();
-      pwm_lect[contador] = duty;
-
-    }else if(SENTIDOHORARIO){
+    if(digitalRead(SENTIDO_HORARIO) == HIGH){
       encoder_lect[contador] = encoder.getCount();
       pwm_lect[contador] = (-1)*duty;
+
+    }else if(digitalRead(SENTIDO_ANTIHORARIO) == HIGH){
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = duty;
+    }else{
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = 0; // Si no hay sentido, guardo 0
     }
   }
 
-  //Segundo if, asigna el PID
   if (b_PID){
+    /*
+      Fórmula discreta (digital) del controlador PID:
+        u(k) = a . e(k) + i(k) + d(k)
+        e(k) = r(k) - y(k) : Error actual (setpoint menos la salida)
+        i(k) = b . e(k) + i(k-1) : termino integral acumulado (error por constante más el anterior)
+        d(k) = c . [y(k) - y(k-1)] / Ts : Termino derivativo (tasa de cambio, tomo deltas).
 
-    input = encoder.getCount();
+        a-> ganancia proporcional
+        b-> coeficiente integral (normalmente b = Kp . Ti)
+        c-> coeficiente derivativo (normalmente c = Kd / Ts)
+        u(k)-> señal de control, en este caso el PWM
+        Ts-> tiempo de muestreo
+
+    */
     
-    myPID.Compute();             // Calcula el nuevo valor de salida del PID
-    duty = (int)output;          // Casteo
+    //Calculo de constantes:
+
+    a= kp +  ki * Ts;
+    b = ki * Ts;
+    c = kd / Ts;
+
+    //e(k) = r(k) - y(k) : Error actual (setpoint menos la salida)
+    eT= setpoint - (encoder.getCount())/MAX_VALUE_ENCODER;
+
+/*
+"Si el anti-windup está desactivado, o bien el control anterior no está saturado en el límite positivo
+ mientras el error quiere seguir subiendo, y no está saturado en el límite negativo mientras el error
+  quiere seguir bajando, entonces permite que el integrador acumule."
+
+Solo acumula si:
+No está saturado por arriba o el error quiere ir hacia abajo, y
+No está saturado por abajo o el error quiere ir hacia arriba
+*/
+    if ((!b_windup)|| (((u_1 < 12) || (eT < 0)) && ((u_1 > -12) || (eT > 0)))){
+
+      iT = b * eT + iT0;
+    }
     
-    duty = map(duty,MAX_VALUE_ENCODER*(-1) ,MAX_VALUE_ENCODER , -100, 100); // verificar mapeo con el profe
+    //Se hace un filtro de media móvil de 5 valores para suavizar el ruido del encoder.
+    filtro[0]=filtro[1];
+    filtro[1]=filtro[2];
+    filtro[2]=filtro[3];
+    filtro[3]=filtro[4];
+    filtro[4]=QEI_Pos - QEI_Pos_1;
+
+    //d(k) = c . [y(k) - y(k-1)] / Ts : Termino derivativo (tasa de cambio promedio, tomo deltas).
+    dT = c * ((filtro[0]+filtro[1]+filtro[2]+filtro[3]+filtro[4]) / 5) / (MAX_VALUE_ENCODER);
 
 
-    if (output >= 0) {
-      digitalWrite(SENTIDOHORARIO, HIGH);
-      digitalWrite(SENTIDOANTIHORARIO, LOW);
-      pwm->setPWM(PWM_PIN, FRECUENCIA, (int)output);
+    //u(k) = a . e(k) + i(k) + d(k)
+    //Cálculo de la señal de control total:
+    uT = a * eT + iT + dT; //Calcular senal de control u(kT)
+
+    //limitar la salida - SATURACION
+    if (uT > V_PID_MAX){
+      uT = V_PID_MAX;
+    }else if (uT < V_PID_MIN){
+      uT = V_PID_MIN;
+    }
+
+    duty = uT/(V_PID_MAX)*100;
+
+
+    //Actualización de variables para la siguiente iteración:
+    u_1 = uT;
+    iT0 = iT;
+		eT0 = eT;
+    x0_1 = x0;
+    
+    if (duty >= 0) {
+      digitalWrite(SENTIDO_HORARIO, HIGH);
+      digitalWrite(SENTIDO_ANTIHORARIO, LOW);
+      pwm->setPWM(PWM_PIN, FRECUENCIA, (int)duty);
   } else {
-      digitalWrite(SENTIDOHORARIO, LOW);
-      digitalWrite(SENTIDOANTIHORARIO, HIGH);
-      pwm->setPWM(PWM_PIN, FRECUENCIA, (int)(-output)); // valor positivo para PWM / evito tener dos variables duty, la ultima es el duty casteado.
+      digitalWrite(SENTIDO_HORARIO, LOW);
+      digitalWrite(SENTIDO_ANTIHORARIO, HIGH);
+      pwm->setPWM(PWM_PIN, FRECUENCIA, (int)(-duty)); // valor positivo para PWM
   }
 
-  // Guardar los valores de encoder y PWM en los arrays
-  //EL PWM SE GUARDA SEGUN SENTIDO, YA QUE EL OBJETO PWM NO ME PERMITE HACERLO CON UN VALOR NEGATIVO
-    if(SENTIDOANTIHORARIO){
+    // Guardar los valores de encoder y PWM en los arrays
+    //EL PWM SE GUARDA SEGUN SENTIDO, YA QUE EL OBJETO PWM NO ME PERMITE HACERLO CON UN VALOR NEGATIVO
+    if(digitalRead(SENTIDO_HORARIO) == HIGH){
       encoder_lect[contador] = encoder.getCount();
       pwm_lect[contador] = duty;
-    }else if(SENTIDOHORARIO){
+
+    }else if(digitalRead(SENTIDO_ANTIHORARIO) == HIGH){
       encoder_lect[contador] = encoder.getCount();
-      pwm_lect[contador] = (-1)*duty;
+      pwm_lect[contador] = (-1) * duty;
+    }else{
+      encoder_lect[contador] = encoder.getCount();
+      pwm_lect[contador] = 0; // Si no hay sentido, guardo 0
     }
 
   }
 
   // Trabaja la planta con los valores del PID y varía el setpoint
+  //CORREGIR PARA EL NUEVO PID 
   if(b_planta){
 
     //SIMILAR AL ANTERIOR, PERO VOY MODIFICANDO EL SETPOINT
@@ -524,22 +603,21 @@ void loop() {
     //3. asignar el duty PERO, no tiene sentido si lo tenemos quieto.
     // si el encoder.getCount() es igual al setpoint, entonces no hay que hacer nada.
     //4. cambiamos el setpoint del bracito, entonces obligamos al pid a cambiar para alcanzar el setpoint.
-
+/* 
     input = encoder.getCount();
     
-    myPID.Compute();             // Calcula el nuevo valor de salida del PID
     duty = (int)output;          // Casteo
     
     duty = map(duty,MAX_VALUE_ENCODER*(-1) ,MAX_VALUE_ENCODER , -100, 100); // verificar mapeo con el profe
 
 
     if (output >= 0) {
-      digitalWrite(SENTIDOHORARIO, HIGH);
-      digitalWrite(SENTIDOANTIHORARIO, LOW);
+      digitalWrite(SENTIDO_HORARIO, HIGH);
+      digitalWrite(SENTIDO_ANTIHORARIO, LOW);
       pwm->setPWM(PWM_PIN, FRECUENCIA, (int)output);
     } else {
-      digitalWrite(SENTIDOHORARIO, LOW);
-      digitalWrite(SENTIDOANTIHORARIO, HIGH);
+      digitalWrite(SENTIDO_HORARIO, LOW);
+      digitalWrite(SENTIDO_ANTIHORARIO, HIGH);
       pwm->setPWM(PWM_PIN, FRECUENCIA, (int)(-output)); // valor positivo para PWM / evito tener dos variables duty, la ultima es el duty casteado.
     }
     
@@ -569,24 +647,24 @@ void loop() {
     case 100:
       setpoint = 0; // Cambia el set
       b_planta = false; // Termina la planta
-      digitalWrite(SENTIDOHORARIO, LOW);  
-      digitalWrite(SENTIDOANTIHORARIO, LOW);
+      digitalWrite(SENTIDO_HORARIO, LOW);  
+      digitalWrite(SENTIDO_ANTIHORARIO, LOW);
       pwm->setPWM(PWM_PIN, FRECUENCIA, 0); // Apaga
       break;
 
     default:
-      break; 
+      break;  
     }
     // Guardar los valores de encoder y PWM en los arrays
     //EL PWM SE GUARDA SEGUN SENTIDO, YA QUE EL OBJETO PWM NO ME PERMITE HACERLO CON UN VALOR NEGATIVO
-    if(SENTIDOANTIHORARIO){
+    if(SENTIDO_ANTIHORARIO){
       encoder_lect[contador] = encoder.getCount();
       pwm_lect[contador] = duty;
 
-    }else if(SENTIDOHORARIO){
+    }else if(SENTIDO_HORARIO){
       encoder_lect[contador] = encoder.getCount();
       pwm_lect[contador] = (-1)*duty;
-    }
+    } */
 
   }
 
@@ -617,12 +695,12 @@ void loop() {
   Serial.printf(">Encoder:%d\n", encoder.getCount());
   Serial.printf(">Contador: %d\n", contador);
 
-  if(digitalRead(SENTIDOANTIHORARIO) == HIGH){
+  if(digitalRead(SENTIDO_ANTIHORARIO) == HIGH){
     //Serial.printf(">| Frecuencia: %d Hz | Duty: %d%%\n", FRECUENCIA, duty);
     Serial.printf(">PWM_Duty:%ld:%d\n", millis(), duty * (-1));  //Grafico el duty negativo para el sentido antihorario
   }
 
-  if(digitalRead(SENTIDOHORARIO) == HIGH){
+  if(digitalRead(SENTIDO_HORARIO) == HIGH){
     //Serial.printf(">| Frecuencia: %d Hz | Duty: %d%%\n", FRECUENCIA, duty);
     Serial.printf(">PWM_Duty:%ld:%d\n", millis(), duty);
   }
